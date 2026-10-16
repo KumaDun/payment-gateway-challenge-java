@@ -19,4 +19,31 @@ public class CommonExceptionHandler {
     return new ResponseEntity<>(new ErrorResponse("Page not found"),
         HttpStatus.NOT_FOUND);
   }
+
+  @ExceptionHandler(PaymentNotFoundException.class)
+  public ResponseEntity<ErrorResponse> handlePaymentNotFound(
+      PaymentNotFoundException ex) {
+    LOG.error("Exception happened", ex);
+    return new ResponseEntity<>(new ErrorResponse("Payment not found"),
+        HttpStatus.NOT_FOUND);
+  }
+
+  @ExceptionHandler(BankUnavailableException.class)
+  public ResponseEntity<ErrorResponse> handleBankUnavailable(
+      BankUnavailableException ex) {
+    LOG.error("Bank communication failed");
+
+    return new ResponseEntity<>(new ErrorResponse("Bank communication error"),
+        HttpStatus.SERVICE_UNAVAILABLE);
+  }
+
+  @ExceptionHandler(BankBadRequestException.class)
+  public ResponseEntity<ErrorResponse> handleBankUnavailable(
+      BankBadRequestException ex) {
+    LOG.error("Bank rejected the request constructed by the gateway");
+
+    return new ResponseEntity<>(new ErrorResponse("Bad bank request"),
+        HttpStatus.INTERNAL_SERVER_ERROR);
+  }
+
 }
