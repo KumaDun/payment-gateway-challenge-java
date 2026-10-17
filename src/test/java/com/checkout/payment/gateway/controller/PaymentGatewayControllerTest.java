@@ -8,13 +8,16 @@ import static org.springframework.test.web.client.match.MockRestRequestMatchers.
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withException;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 import com.checkout.payment.gateway.enums.PaymentStatus;
 import com.checkout.payment.gateway.model.PostPaymentResponse;
 import com.checkout.payment.gateway.repository.PaymentsRepository;
 import java.util.UUID;
 import java.time.YearMonth;
+import java.net.SocketTimeoutException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
@@ -95,7 +98,7 @@ class PaymentGatewayControllerTest {
   void submittedPaymentCanBeRetrievedWithMaskedCard(boolean authorized, String expectedStatus)
       throws Exception {
     ObjectNode request = validRequest();
-    YearMonth expiry = YearMonth.now().plusYears(1);
+    YearMonth expiry = YearMonth.now().plusYears(1).withMonth(12);
     bank.expect(requestTo("http://localhost:8080/payments"))
         .andExpect(method(HttpMethod.POST))
         .andExpect(content().json("""
@@ -123,8 +126,9 @@ class PaymentGatewayControllerTest {
 
   @ParameterizedTest
   @CsvSource({"card_number,123", "card_number,411111111111111x",
-      "expiry_month,0", "expiry_month,13", "expiry_year,1899",
-      "currency,JPY", "currency,usd", "amount,0", "amount,-1", "cvv,12", "cvv,12x"})
+      "card_number,12345678901234567890", "expiry_month,0", "expiry_month,13",
+      "expiry_year,1899", "expiry_year,10000", "currency,JPY", "currency,usd",
+      "amount,0", "amount,-1", "cvv,12", "cvv,12x", "cvv,12345"})
   void invalidFieldsAreRejectedBeforeCallingBank(String field, String value) throws Exception {
     ObjectNode request = validRequest();
     if (field.equals("expiry_month") || field.equals("expiry_year") || field.equals("amount")) {
@@ -152,28 +156,99 @@ class PaymentGatewayControllerTest {
     assertRejected(request);
   }
 
-  @Test
-  void bankUnavailableReturns503() throws Exception {
+  @ParameterizedTest
+  @ValueSource(ints = {400, 500, 503})
+  void bankHttpErrorsReturnRetrievableDeclinedPayment(int bankStatus) throws Exception {
     bank.expect(requestTo("http://localhost:8080/payments"))
-        .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
-    mvc.perform(MockMvcRequestBuilders.post("/api/payment")
-            .contentType(MediaType.APPLICATION_JSON).content(validRequest().toString()))
-        .andExpect(status().isServiceUnavailable())
-        .andExpect(jsonPath("$.message").value("Bank communication error"));
+        .andRespond(withStatus(HttpStatus.valueOf(bankStatus))
+            .contentType(MediaType.APPLICATION_JSON)
+            .body("{\"internal_error\":\"private-bank-diagnostic\"}"));
+    assertDeclinedAndRetrievable();
   }
 
   @Test
-  void bankRejectingGatewayRequestReturns500() throws Exception {
+  void bankTimeoutReturnsRetrievableDeclinedPayment() throws Exception {
     bank.expect(requestTo("http://localhost:8080/payments"))
-        .andRespond(withStatus(HttpStatus.BAD_REQUEST));
+        .andRespond(withException(new SocketTimeoutException("private-bank-diagnostic")));
+    assertDeclinedAndRetrievable();
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"", "{", "{}", "{\"authorized\":null}"})
+  void emptyMalformedOrMissingAuthorizationReturnsDeclined(String bankBody) throws Exception {
+    bank.expect(requestTo("http://localhost:8080/payments"))
+        .andRespond(withSuccess(bankBody, MediaType.APPLICATION_JSON));
+    assertDeclinedAndRetrievable();
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"card_number", "expiry_month", "expiry_year", "currency", "amount", "cvv"})
+  void nullRequiredFieldsAreRejectedBeforeCallingBank(String field) throws Exception {
+    ObjectNode request = validRequest();
+    request.putNull(field);
+    assertRejected(request);
+  }
+
+  @Test
+  void malformedMerchantJsonIsRejectedBeforeCallingBank() throws Exception {
     mvc.perform(MockMvcRequestBuilders.post("/api/payment")
+            .contentType(MediaType.APPLICATION_JSON).content("{"))
+        .andExpect(status().isBadRequest());
+  }
+
+  @Test
+  void invalidPaymentIdReturns400() throws Exception {
+    mvc.perform(MockMvcRequestBuilders.get("/api/payment/not-a-uuid"))
+        .andExpect(status().isBadRequest());
+  }
+
+  @ParameterizedTest
+  @CsvSource({"USD,123", "EUR,1234", "GBP,123"})
+  void supportedCurrenciesAndCvvLengthsAreAccepted(String currency, String cvv) throws Exception {
+    ObjectNode request = validRequest().put("currency", currency).put("cvv", cvv);
+    bank.expect(requestTo("http://localhost:8080/payments"))
+        .andExpect(content().json("{\"currency\":\"" + currency + "\",\"cvv\":\"" + cvv + "\"}"))
+        .andRespond(withSuccess("{\"authorized\":true}", MediaType.APPLICATION_JSON));
+    mvc.perform(MockMvcRequestBuilders.post("/api/payment")
+            .contentType(MediaType.APPLICATION_JSON).content(request.toString()))
+        .andExpect(status().isCreated())
+        .andExpect(jsonPath("$.status").value("Authorized"));
+  }
+
+  @Test
+  void cardExpiringThisMonthIsAccepted() throws Exception {
+    YearMonth current = YearMonth.now();
+    ObjectNode request = validRequest()
+        .put("expiry_month", current.getMonthValue()).put("expiry_year", current.getYear());
+    bank.expect(requestTo("http://localhost:8080/payments"))
+        .andRespond(withSuccess("{\"authorized\":true}", MediaType.APPLICATION_JSON));
+    mvc.perform(MockMvcRequestBuilders.post("/api/payment")
+            .contentType(MediaType.APPLICATION_JSON).content(request.toString()))
+        .andExpect(status().isCreated())
+        .andExpect(jsonPath("$.status").value("Authorized"));
+  }
+
+  private void assertDeclinedAndRetrievable() throws Exception {
+    String response = mvc.perform(MockMvcRequestBuilders.post("/api/payment")
             .contentType(MediaType.APPLICATION_JSON).content(validRequest().toString()))
-        .andExpect(status().isInternalServerError())
-        .andExpect(jsonPath("$.message").value("Bad bank request"));
+        .andExpect(status().isCreated())
+        .andExpect(jsonPath("$.status").value("Declined"))
+        .andExpect(jsonPath("$.cardNumberLastFour").value("0001"))
+        .andExpect(jsonPath("$.card_number").doesNotExist())
+        .andExpect(jsonPath("$.cardNumber").doesNotExist())
+        .andExpect(jsonPath("$.cvv").doesNotExist())
+        .andExpect(jsonPath("$.message").doesNotExist())
+        .andExpect(result -> assertFalse(
+            result.getResponse().getContentAsString().contains("private-bank-diagnostic")))
+        .andReturn().getResponse().getContentAsString();
+    UUID id = UUID.fromString(objectMapper.readTree(response).get("id").asText());
+    String retrieved = mvc.perform(MockMvcRequestBuilders.get("/api/payment/" + id))
+        .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+    assertEquals(objectMapper.readTree(response), objectMapper.readTree(retrieved));
   }
 
   private ObjectNode validRequest() {
-    YearMonth expiry = YearMonth.now().plusYears(1);
+    YearMonth expiry = YearMonth.now().plusYears(1).withMonth(12);
     return objectMapper.createObjectNode()
         .put("card_number", "4111111111110001")
         .put("expiry_month", expiry.getMonthValue())

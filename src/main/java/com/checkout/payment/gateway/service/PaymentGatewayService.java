@@ -1,35 +1,33 @@
 package com.checkout.payment.gateway.service;
 
-import com.checkout.payment.gateway.bank.BankClient;
-import com.checkout.payment.gateway.bank.BankRouter;
+import com.checkout.payment.gateway.bank.SimulatorBankClient;
 import com.checkout.payment.gateway.enums.PaymentStatus;
 import com.checkout.payment.gateway.exception.EventProcessingException;
+import com.checkout.payment.gateway.model.BankPaymentRequest;
 import com.checkout.payment.gateway.model.BankPaymentResponse;
 import com.checkout.payment.gateway.model.PostPaymentRequest;
 import com.checkout.payment.gateway.model.PostPaymentResponse;
 import com.checkout.payment.gateway.repository.PaymentsRepository;
 import java.util.UUID;
+import jakarta.annotation.Nonnull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 
 @Service
 public class PaymentGatewayService {
 
   private static final Logger LOG = LoggerFactory.getLogger(PaymentGatewayService.class);
-
   private final PaymentsRepository paymentsRepository;
-  private final BankRouter bankRouter;
+  private final SimulatorBankClient bankClient;
 
 
   public PaymentGatewayService(
       PaymentsRepository paymentsRepository,
-      RestTemplate restTemplate,
-      BankRouter bankRouter
+      SimulatorBankClient bankClient
   ) {
     this.paymentsRepository = paymentsRepository;
-    this.bankRouter = bankRouter;
+    this.bankClient = bankClient;
   }
 
   public PostPaymentResponse getPaymentById(UUID id) {
@@ -38,29 +36,44 @@ public class PaymentGatewayService {
   }
 
   public PostPaymentResponse processPayment(PostPaymentRequest paymentRequest) {
-    BankClient bankClient = bankRouter.selectBank();
     UUID uuid = UUID.randomUUID();
-    BankPaymentResponse bankResponse =
-        bankClient.processPayment(paymentRequest);
+    PaymentStatus status = PaymentStatus.DECLINED;
+    BankPaymentRequest bankPaymentRequest = new BankPaymentRequest(
+        paymentRequest.getCardNumber(),
+        paymentRequest.getExpiryDate(),
+        paymentRequest.getCurrency(),
+        paymentRequest.getAmount(),
+        paymentRequest.getCvv()
+    );
+    try {
+      BankPaymentResponse bankResponse = bankClient.processPayment(bankPaymentRequest);
+      if (bankResponse != null & bankResponse.authorized()) {
+        status = PaymentStatus.AUTHORIZED;
+      }
+    } catch (Exception e) {
+      LOG.error("Error processing payment", e);
+    }
 
+    PostPaymentResponse paymentResponse = buildPostPaymentResponse(paymentRequest, uuid, status);
+    paymentsRepository.add(paymentResponse);
+    return paymentResponse;
+  }
+
+  @Nonnull
+  private static PostPaymentResponse buildPostPaymentResponse(PostPaymentRequest paymentRequest,
+      UUID uuid, PaymentStatus status) {
     String cardNumber = paymentRequest.getCardNumber();
     String lastFourDigits =
         cardNumber.substring(cardNumber.length() - 4);
 
     PostPaymentResponse paymentResponse = new PostPaymentResponse();
     paymentResponse.setId(uuid);
-    paymentResponse.setStatus(
-        bankResponse.authorized()
-            ? PaymentStatus.AUTHORIZED
-            : PaymentStatus.DECLINED
-    );
+    paymentResponse.setStatus(status);
     paymentResponse.setCardNumberLastFour(lastFourDigits);
     paymentResponse.setExpiryMonth(paymentRequest.getExpiryMonth());
     paymentResponse.setExpiryYear(paymentRequest.getExpiryYear());
     paymentResponse.setCurrency(paymentRequest.getCurrency());
     paymentResponse.setAmount(paymentRequest.getAmount());
-
-    paymentsRepository.add(paymentResponse);
     return paymentResponse;
   }
 }

@@ -15,7 +15,6 @@ public class PaymentsRepository {
     if (payments.putIfAbsent(payment.getId(), payment) != null) {
       throw new IllegalStateException("Payment ID already exists");
     }
-    payments.put(payment.getId(), payment);
   }
 
   public Optional<PostPaymentResponse> get(UUID id) {
