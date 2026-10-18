@@ -1,5 +1,6 @@
 package com.checkout.payment.gateway.repository;
 
+import com.checkout.payment.gateway.exception.PaymentStorageException;
 import com.checkout.payment.gateway.model.PostPaymentResponse;
 import java.util.Optional;
 import java.util.UUID;
@@ -13,7 +14,7 @@ public class PaymentsRepository {
 
   public void add(PostPaymentResponse payment) {
     if (payments.putIfAbsent(payment.getId(), payment) != null) {
-      throw new IllegalStateException("Payment ID already exists");
+      throw new PaymentStorageException("Payment ID already exists", payment.getId());
     }
   }
 

@@ -37,6 +37,10 @@ public class PaymentGatewayService {
 
   public PostPaymentResponse processPayment(PostPaymentRequest paymentRequest) {
     UUID uuid = UUID.randomUUID();
+
+    long startTime = System.nanoTime();
+    LOG.debug("Payment processing started paymentId={}", uuid);
+
     PaymentStatus status = PaymentStatus.DECLINED;
     BankPaymentRequest bankPaymentRequest = new BankPaymentRequest(
         paymentRequest.getCardNumber(),
@@ -47,14 +51,25 @@ public class PaymentGatewayService {
     );
     try {
       BankPaymentResponse bankResponse = bankClient.processPayment(bankPaymentRequest);
-      if (bankResponse != null & bankResponse.authorized()) {
+      if (bankResponse != null && bankResponse.authorized()) {
         status = PaymentStatus.AUTHORIZED;
       }
     } catch (Exception e) {
-      LOG.error("Error processing payment", e);
+      LOG.error(
+          "Bank payment request failed paymentId={} failureType={}",
+          uuid,
+          e.getClass().getSimpleName()
+      );
     }
 
     PostPaymentResponse paymentResponse = buildPostPaymentResponse(paymentRequest, uuid, status);
+    long durationMs = (System.nanoTime() - startTime) / 1_000_000;
+    LOG.debug(
+        "Payment processing completed paymentId={} status={} durationMs={}",
+        uuid,
+        status,
+        durationMs
+    );
     paymentsRepository.add(paymentResponse);
     return paymentResponse;
   }
